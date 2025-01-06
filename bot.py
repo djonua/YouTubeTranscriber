@@ -6,8 +6,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled, NoTranscriptAvailable
-from youtube_transcript_api.formatters import SRTFormatter
+from aiohttp import ClientSession
 import openai
 import signal
 import sys
@@ -85,6 +84,11 @@ class YouTubeTranscriberBot:
         self.bot_token: str = os.getenv('TELEGRAM_BOT_TOKEN')
         if not self.bot_token:
             raise ValueError("TELEGRAM_BOT_TOKEN не найден в переменных окружения")
+
+        # YouTube API key
+        self.youtube_api_key = os.getenv('YOUTUBE_API_KEY')
+        if not self.youtube_api_key:
+            raise ValueError("YOUTUBE_API_KEY не найден в переменных окружения")
             
         # Хранение контекста для каждого чата
         self.chat_contexts: Dict[int, str] = {}
@@ -178,6 +182,47 @@ class YouTubeTranscriberBot:
         # Объединяем все строки с текстом
         return ' '.join(cleaned_text)
 
+    async def _get_captions(self, video_id: str) -> tuple:
+        """Получение субтитров через YouTube Data API"""
+        url = f"https://www.googleapis.com/youtube/v3/captions"
+        params = {
+            "part": "snippet",
+            "videoId": video_id,
+            "key": self.youtube_api_key
+        }
+        
+        try:
+            async with ClientSession() as session:
+                async with session.get(url, params=params) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        captions = data.get("items", [])
+                        
+                        # Ищем русские или английские субтитры
+                        ru_caption = next((c for c in captions if c["snippet"]["language"] == "ru"), None)
+                        en_caption = next((c for c in captions if c["snippet"]["language"] == "en"), None)
+                        
+                        caption = ru_caption or en_caption
+                        if not caption:
+                            return None, "Субтитры не найдены"
+                            
+                        # Получаем сам текст субтитров
+                        caption_id = caption["id"]
+                        caption_url = f"https://www.googleapis.com/youtube/v3/captions/{caption_id}"
+                        headers = {"Authorization": f"Bearer {self.youtube_api_key}"}
+                        
+                        async with session.get(caption_url, headers=headers) as caption_response:
+                            if caption_response.status == 200:
+                                caption_text = await caption_response.text()
+                                return caption_text, None
+                            else:
+                                return None, f"Ошибка получения текста субтитров: {caption_response.status}"
+                    else:
+                        return None, f"Ошибка API: {response.status}"
+                        
+        except Exception as e:
+            return None, str(e)
+
     async def _process_youtube_link(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обработка ссылки на YouTube видео"""
         url = update.message.text
@@ -199,23 +244,10 @@ class YouTubeTranscriberBot:
 
             await update.message.reply_html("🎬 <b>Начинаю обработку видео...</b>")
             
-            try:
-                transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-                logger.info(f"Получен список субтитров для видео {video_id}")
-                
-                # Пробуем получить русские субтитры
-                try:
-                    transcript = transcript_list.find_transcript(['ru'])
-                    logger.info("Найдены русские субтитры")
-                except NoTranscriptFound:
-                    # Если русских нет, берем английские и переводим
-                    logger.info("Русские субтитры не найдены, ищем английские")
-                    transcript = transcript_list.find_transcript(['en'])
-                    transcript = transcript.translate('ru')
-                    logger.info("Английские субтитры переведены на русский")
-                
-            except (NoTranscriptAvailable, TranscriptsDisabled) as e:
-                logger.error(f"Ошибка при получении субтитров: {str(e)}")
+            transcript, error = await self._get_captions(video_id)
+            
+            if error:
+                logger.error(f"Ошибка при получении субтитров: {error}")
                 await update.message.reply_html(
                     "❌ <b>Не удалось получить субтитры для этого видео.</b>\n"
                     "Возможные причины:\n"
@@ -225,9 +257,8 @@ class YouTubeTranscriberBot:
                 )
                 return
             
-            transcript_text = transcript.fetch()
             # Очищаем транскрипт от лишней информации
-            cleaned_transcript = self._clean_transcript(transcript_text)
+            cleaned_transcript = self._clean_transcript(transcript)
             logger.info(f"Субтитры очищены, длина: {len(cleaned_transcript)} символов")
             
             # Сохраняем очищенный транскрипт в контекст
