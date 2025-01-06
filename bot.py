@@ -9,6 +9,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled, NoTranscriptAvailable
 from youtube_transcript_api.formatters import SRTFormatter
 import openai
+import signal
+import sys
 
 # Настройка логирования
 log_dir = "logs"
@@ -86,7 +88,6 @@ class YouTubeTranscriberBot:
             
         # Хранение контекста для каждого чата
         self.chat_contexts: Dict[int, str] = {}
-        self.formatter = SRTFormatter()
         
         # Инициализация конфигурации OpenAI
         self.openai_config = OpenAIConfig()
@@ -94,8 +95,32 @@ class YouTubeTranscriberBot:
             api_key=self.openai_config.api_key,
             base_url=self.openai_config.api_base
         )
+
+        # Создаем директорию для логов запросов
+        self.logs_dir = "logs"
+        if not os.path.exists(self.logs_dir):
+            os.makedirs(self.logs_dir)
+        
+        # Обработка сигналов завершения
+        signal.signal(signal.SIGTERM, self._handle_shutdown)
+        signal.signal(signal.SIGINT, self._handle_shutdown)
         
         logger.info("Бот инициализирован")
+
+    def _handle_shutdown(self, signum, frame):
+        """Обработчик сигналов завершения"""
+        logger.info("Получен сигнал завершения, закрываем бота...")
+        sys.exit(0)
+
+    def _log_request(self, user_id: int, username: str, url: str):
+        """Логирование запроса пользователя"""
+        log_file = os.path.join(self.logs_dir, "requests.log")
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_entry = f"{timestamp}, User ID: {user_id}, Username: {username}, URL: {url}\n"
+        
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(log_entry)
+        logger.info(f"Запрос залогирован: {log_entry.strip()}")
 
     @staticmethod
     def extract_video_id(url: str) -> Optional[str]:
@@ -138,11 +163,29 @@ class YouTubeTranscriberBot:
             logger.info(f"Обрабатываем вопрос от пользователя {user.id}")
             await self._process_question(update, context)
 
+    def _clean_transcript(self, transcript_list: list) -> str:
+        """Очистка транскрипции от лишней информации"""
+        cleaned_text = []
+        
+        for item in transcript_list:
+            # Берем только текст, пропускаем временные метки
+            if 'text' in item:
+                text = item['text'].strip()
+                # Пропускаем пустые строки и строки только с пробелами
+                if text and not text.isspace():
+                    cleaned_text.append(text)
+        
+        # Объединяем все строки с текстом
+        return ' '.join(cleaned_text)
+
     async def _process_youtube_link(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обработка ссылки на YouTube видео"""
         url = update.message.text
         user = update.effective_user
         try:
+            # Логируем запрос
+            self._log_request(user.id, user.username or "Unknown", url)
+            
             logger.info(f"Начинаем обработку видео {url} для пользователя {user.id}")
             video_id = self.extract_video_id(url)
             
@@ -183,25 +226,30 @@ class YouTubeTranscriberBot:
                 return
             
             transcript_text = transcript.fetch()
-            formatted_transcript = self.formatter.format_transcript(transcript_text)
-            logger.info(f"Субтитры успешно получены, длина: {len(formatted_transcript)} символов")
+            # Очищаем транскрипт от лишней информации
+            cleaned_transcript = self._clean_transcript(transcript_text)
+            logger.info(f"Субтитры очищены, длина: {len(cleaned_transcript)} символов")
             
-            # Сохраняем контекст для последующих вопросов
-            context.chat_data['transcript'] = formatted_transcript
+            # Сохраняем очищенный транскрипт в контекст
+            context.chat_data['transcript'] = cleaned_transcript
+            context.chat_data['video_id'] = video_id
             logger.info(f"Контекст сохранен для чата {update.effective_chat.id}")
             
             logger.info("Отправляем запрос к API для генерации краткого содержания")
-            summary = await self._generate_summary(formatted_transcript)
+            summary = await self._generate_summary(cleaned_transcript)
             
             await update.message.reply_html(
                 f"📝 <b>Краткое содержание видео:</b>\n\n{summary}\n\n"
-                "❓ Теперь вы можете задавать мне вопросы по содержанию видео!"
+                "🤔 Теперь вы можете задать мне вопросы по содержанию видео!"
             )
+            logger.info("Краткое содержание отправлено пользователю")
             
         except Exception as e:
-            logger.error(f"Ошибка при обработке YouTube видео: {str(e)}", exc_info=True)
+            error_message = str(e)
+            logger.error(f"Ошибка при обработке видео: {error_message}")
             await update.message.reply_html(
-                f"❌ <b>Произошла ошибка:</b> {str(e)}"
+                "❌ <b>Произошла ошибка при обработке видео.</b>\n"
+                f"Детали: {error_message}"
             )
 
     async def _process_question(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -1,0 +1,16 @@
+[Unit]
+Description=YouTube Transcriber Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/home/YouTubeTranscriber
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/YouTubeTranscriber/venv/bin/python /home/YouTubeTranscriber/bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
