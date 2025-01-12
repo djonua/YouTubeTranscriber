@@ -1,4 +1,4 @@
-#!/bin/bash
+YouTubeTranscriptApi.http_handler = ProxyRequestHandler()#!/bin/bash
 
 # Просмотр логов systemd
 echo "=== Логи systemd ==="

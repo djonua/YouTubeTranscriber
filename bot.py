@@ -10,6 +10,12 @@ from aiohttp import ClientSession
 import openai
 import signal
 import sys
+import requests
+import urllib3
+import ssl
+
+# Отключаем предупреждения о небезопасных SSL-соединениях
+urllib3.disable_warnings()
 
 # Настройка логирования
 log_dir = "logs"
@@ -100,10 +106,17 @@ class YouTubeTranscriberBot:
             base_url=self.openai_config.api_base
         )
 
-        # Создаем директорию для логов запросов
+        # Создаем директорию для логов
         self.logs_dir = "logs"
         if not os.path.exists(self.logs_dir):
             os.makedirs(self.logs_dir)
+            
+        # Настройка прокси
+        self.proxy_url = os.getenv('PROXY_URL')
+        if self.proxy_url:
+            os.environ['HTTPS_PROXY'] = self.proxy_url
+            os.environ['HTTP_PROXY'] = self.proxy_url
+            logger.info(f"Прокси настроен: {self.proxy_url}")
         
         # Обработка сигналов завершения
         signal.signal(signal.SIGTERM, self._handle_shutdown)
@@ -242,7 +255,7 @@ class YouTubeTranscriberBot:
                 )
                 return
 
-            await update.message.reply_html("🎬 <b>Начинаю обработку видео...</b>")
+            await update.message.reply_html("🎬 <b>Начинаем обработку видео...</b>")
             
             transcript, error = await self._get_captions(video_id)
             
@@ -360,8 +373,27 @@ class YouTubeTranscriberBot:
     def run(self) -> None:
         """Запуск бота"""
         logger.info("Запускаем бота...")
-        application = Application.builder().token(self.bot_token).build()
         
+        # Настройка прокси для Telegram
+        proxy_url = os.getenv('PROXY_URL')
+        
+        # Создаем базовую конфигурацию для запросов
+        request_kwargs = {
+            'proxy_url': proxy_url,
+            'verify': False  # Отключаем проверку SSL
+        } if proxy_url else {}
+        
+        application = (
+            Application.builder()
+            .token(self.bot_token)
+            .connection_pool_size(8)  # Увеличиваем пул соединений
+            .read_timeout(30)  # Увеличиваем таймаут
+            .write_timeout(30)
+            .connect_timeout(30)
+            .pool_timeout(30)
+            .build()
+        )
+
         # Регистрация обработчиков
         application.add_handler(CommandHandler("start", self.start))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
